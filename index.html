@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bipolar Chat</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['Inter', 'sans-serif'],
+            },
+            colors: {
+              'bipolar-dark': '#0f172a',
+              'bipolar-darker': '#020617',
+              'bipolar-accent': '#3b82f6',
+              'chat-sent': '#005c4b',
+              'chat-received': '#202c33',
+            }
+          }
+        }
+      }
+    </script>
+    <style>
+      body {
+        background-color: #020617;
+        color: #e2e8f0;
+      }
+      ::-webkit-scrollbar { width: 6px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+      ::-webkit-scrollbar-thumb:hover { background: #475569; }
+      
+      .hide-scrollbar::-webkit-scrollbar {
+          display: none;
+      }
+      .hide-scrollbar {
+          -ms-overflow-style: none;
+          scrollbar-width: none;
+      }
+    </style>
+    <script type="importmap">
+    {
+      "imports": {
+        "firebase/app": "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js",
+        "firebase/database": "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js"
+      }
+    }
+    </script>
+  </head>
+  <body>
+    <div id="root" class="h-screen w-screen bg-black overflow-hidden"></div>
+
+    <script type="module">
+      import { initializeApp } from "firebase/app";
+      import { getDatabase, ref, push, onValue, off } from "firebase/database";
+
+      // --- CONSTANTS ---
+      const USERS = [
+        { 
+          id: 'Shashwat', 
+          name: 'Shashwat', 
+          avatar: 'res/icon-1.png',
+          color: 'bg-emerald-600'
+        },
+        { 
+          id: 'Apoorva', 
+          name: 'Apoorva', 
+          avatar: 'res/icon-2.png',
+          color: 'bg-indigo-600'
+        }
+      ];
+
+      const getWeekNumber = (d = new Date()) => {
+        d = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+        d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
+        const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+        const weekNo = Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+        return weekNo;
+      };
+
+      const getCurrentWeekKey = () => {
+        const week = getWeekNumber();
+        const year = new Date().getFullYear();
+        return `week_${year}_${week}`;
+      };
+
+      const formatTime = (timestamp) => {
+        return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      };
+
+      const formatDate = (timestamp) => {
+        return new Date(timestamp).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+      };
+
+      // --- FIREBASE SERVICE ---
+      const firebaseConfig = {
+        apiKey: "AIzaSyBIyIXYNvVhJnSK58rB29K9n7SNnbaoqnc",
+        authDomain: "proposal-apoorva-sarvagy.firebaseapp.com",
+        databaseURL: "https://proposal-apoorva-sarvagy-default-rtdb.asia-southeast1.firebasedatabase.app",
+        projectId: "proposal-apoorva-sarvagy",
+        storageBucket: "proposal-apoorva-sarvagy.firebasestorage.app",
+        messagingSenderId: "794226715688",
+        appId: "1:794226715688:web:284222db7af709b2cd591d",
+        measurementId: "G-BZ4R12MR9T"
+      };
+
+      const app = initializeApp(firebaseConfig);
+      const db = getDatabase(app);
+      const ROOT_NODE = "messages_site";
+
+      const sendMessage = async (senderId, receiverId, text) => {
+        const weekKey = getCurrentWeekKey();
+        const timestamp = Date.now();
+
+        const messagePayload = {
+          sent_by: senderId,
+          sent_to: receiverId,
+          message: text,
+          timestamp: timestamp
+        };
+
+        const senderRef = ref(db, `${ROOT_NODE}/${senderId}/sent/${weekKey}`);
+        await push(senderRef, messagePayload);
+
+        const receiverRef = ref(db, `${ROOT_NODE}/${receiverId}/received/${weekKey}`);
+        await push(receiverRef, messagePayload);
+      };
+
+      const subscribeToMessages = (currentUser, callback) => {
+        const sentRef = ref(db, `${ROOT_NODE}/${currentUser}/sent`);
+        const receivedRef = ref(db, `${ROOT_NODE}/${currentUser}/received`);
+
+        let sentData = {};
+        let receivedData = {};
+
+        const processData = () => {
+          const allMessages = [];
+
+          const extractMessages = (mailbox) => {
+            if (!mailbox) return;
+            Object.keys(mailbox).forEach(weekKey => {
+              const weekMessages = mailbox[weekKey];
+              if (!weekMessages) return;
+              
+              Object.keys(weekMessages).forEach(msgId => {
+                const rawMsg = weekMessages[msgId];
+                allMessages.push({
+                  id: msgId,
+                  text: rawMsg.text || rawMsg.message,
+                  sentBy: rawMsg.sent_by,
+                  sentTo: rawMsg.sent_to,
+                  timestamp: rawMsg.timestamp
+                });
+              });
+            });
+          };
+
+          extractMessages(sentData);
+          extractMessages(receivedData);
+
+          allMessages.sort((a, b) => a.timestamp - b.timestamp);
+
+          callback(allMessages);
+        };
+
+        const onSentValue = onValue(sentRef, (snapshot) => {
+          sentData = snapshot.val() || {};
+          processData();
+        });
+
+        const onReceivedValue = onValue(receivedRef, (snapshot) => {
+          receivedData = snapshot.val() || {};
+          processData();
+        });
+
+        return () => {
+          onSentValue(); // Unsubscribe not directly supported by just calling function on 3rd party wrappers sometimes, but Firebase onValue returns unsubscribe.
+          off(sentRef); // Explicit off if needed, but onValue returns unsubscribe
+          off(receivedRef);
+        };
+      };
+
+      // --- APP LOGIC ---
+      
+      // State
+      let state = {
+        currentUser: null,
+        selectedUser: null,
+        messages: [],
+        unsubscribe: null
+      };
+
+      // DOM Root
+      const root = document.getElementById('root');
+
+      // Persistence
+      const savedUserId = localStorage.getItem('bipolar_user_id');
+      if (savedUserId) {
+        const user = USERS.find(u => u.id === savedUserId);
+        if (user) {
+          state.currentUser = user;
+          initApp();
+        } else {
+          renderLogin();
+        }
+      } else {
+        renderLogin();
+      }
+
+      // Login Screen
+      function renderLogin() {
+        root.innerHTML = `
+          <div class="min-h-screen bg-bipolar-darker flex flex-col items-center justify-center p-4 w-full">
+            <div class="max-w-2xl w-full">
+              <div class="text-center mb-12">
+                <h1 class="text-4xl md:text-6xl font-bold text-white mb-4 tracking-tighter">Who are you?</h1>
+                <p class="text-gray-400 text-lg">Select your identity to access the private network.</p>
+              </div>
+              <div class="grid grid-cols-2 gap-6 justify-center" id="login-grid">
+                <!-- Users injected here -->
+              </div>
+              <div class="mt-16 text-center">
+                <p class="text-gray-600 text-sm">
+                  Bipolar Encrypted Connection &bull; Version 1.0 &bull; Pure JS Edition
+                </p>
+              </div>
+            </div>
+          </div>
+        `;
+
+        const grid = document.getElementById('login-grid');
+        USERS.forEach(user => {
+          const el = document.createElement('div');
+          el.className = "group relative bg-gray-800 rounded-xl p-6 cursor-pointer hover:bg-gray-700 transition-all duration-300 transform hover:-translate-y-2 border border-gray-700 hover:border-gray-500 max-w-xs mx-auto w-full";
+          el.onclick = () => handleLogin(user);
+          el.innerHTML = `
+            <div class="flex flex-col items-center">
+              <div class="w-20 h-20 rounded-full mb-4 p-1 ${user.color} bg-opacity-20">
+                <img src="${user.avatar}" class="w-full h-full rounded-full object-cover border-2 border-white/10 group-hover:border-white/50 transition-colors" />
+              </div>
+              <h3 class="text-xl font-medium text-white group-hover:text-emerald-400 transition-colors">${user.name}</h3>
+              <span class="mt-2 text-xs text-gray-500 group-hover:text-gray-300">Tap to login</span>
+            </div>
+          `;
+          grid.appendChild(el);
+        });
+      }
+
+      function handleLogin(user) {
+        state.currentUser = user;
+        localStorage.setItem('bipolar_user_id', user.id);
+        initApp();
+      }
+
+      window.handleLogout = function() {
+        if (state.unsubscribe) state.unsubscribe();
+        state = {
+          currentUser: null,
+          selectedUser: null,
+          messages: [],
+          unsubscribe: null
+        };
+        localStorage.removeItem('bipolar_user_id');
+        renderLogin();
+      }
+
+      // Main App Initialization
+      function initApp() {
+        // Subscribe to firebase
+        state.unsubscribe = subscribeToMessages(state.currentUser.id, (msgs) => {
+          state.messages = msgs;
+          refreshUI(); 
+        });
+
+        renderAppStructure();
+      }
+
+      // Render the shell (Sidebar + Chat Container)
+      function renderAppStructure() {
+        root.innerHTML = `
+          <div class="flex w-full h-full bg-black overflow-hidden relative">
+            <!-- Sidebar -->
+            <div id="sidebar" class="w-full md:w-80 lg:w-96 flex-none bg-bipolar-dark border-r border-gray-800 flex flex-col h-full z-20 absolute md:relative transition-transform duration-300">
+              <!-- Sidebar Header -->
+              <div class="bg-gray-900 p-4 flex items-center justify-between border-b border-gray-800 h-16 flex-none">
+                <div class="flex items-center gap-3">
+                  <img src="${state.currentUser.avatar}" class="w-10 h-10 rounded-full border border-gray-600" />
+                  <span class="font-semibold text-gray-200">Me (${state.currentUser.name})</span>
+                </div>
+                <button onclick="handleLogout()" class="text-xs text-red-400 hover:text-red-300 transition">Change ID</button>
+              </div>
+              
+              <!-- Search -->
+              <div class="p-2 flex-none">
+                <div class="bg-gray-800 rounded-lg flex items-center px-3 py-2">
+                  <svg class="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+                  <input type="text" placeholder="Search chat" class="bg-transparent border-none text-sm ml-2 w-full focus:outline-none text-gray-300 placeholder-gray-500" />
+                </div>
+              </div>
+
+              <!-- User List -->
+              <div id="user-list" class="flex-1 overflow-y-auto"></div>
+            </div>
+
+            <!-- Chat Area -->
+            <div id="chat-area" class="flex-1 flex flex-col bg-gray-900 relative w-full h-full z-10 hidden md:flex">
+               <!-- Content injected by renderChat() -->
+            </div>
+          </div>
+        `;
+
+        refreshUI();
+      }
+
+      // Refresh UI based on state
+      function refreshUI() {
+        const sidebar = document.getElementById('sidebar');
+        const chatArea = document.getElementById('chat-area');
+        
+        if (!sidebar || !chatArea) return; 
+
+        // Mobile Toggle Logic
+        if (window.innerWidth < 768) {
+          if (state.selectedUser) {
+            sidebar.classList.add('-translate-x-full');
+            chatArea.classList.remove('hidden');
+            chatArea.classList.add('flex');
+          } else {
+            sidebar.classList.remove('-translate-x-full');
+            chatArea.classList.add('hidden');
+            chatArea.classList.remove('flex');
+          }
+        } else {
+          // Desktop: Always show both
+          sidebar.classList.remove('-translate-x-full');
+          chatArea.classList.remove('hidden');
+          chatArea.classList.add('flex');
+        }
+
+        renderSidebarList();
+        renderChatWindow();
+      }
+
+      function renderSidebarList() {
+        const list = document.getElementById('user-list');
+        if (!list) return;
+        list.innerHTML = '';
+
+        const otherUsers = USERS.filter(u => u.id !== state.currentUser.id);
+
+        otherUsers.forEach(user => {
+          const isSelected = state.selectedUser?.id === user.id;
+          
+          // Get last message
+          const conversation = state.messages.filter(m => 
+            (m.sentBy === state.currentUser.id && m.sentTo === user.id) ||
+            (m.sentBy === user.id && m.sentTo === state.currentUser.id)
+          );
+          const lastMsg = conversation.length > 0 ? conversation[conversation.length - 1] : null;
+
+          const el = document.createElement('div');
+          el.className = `flex items-center p-3 cursor-pointer transition-colors border-b border-gray-800/50 ${isSelected ? 'bg-gray-800' : 'hover:bg-gray-800/50'}`;
+          // Define click handler on the element
+          el.addEventListener('click', () => {
+             state.selectedUser = user;
+             refreshUI();
+          });
+
+          const timeStr = lastMsg ? formatTime(lastMsg.timestamp) : '';
+          const msgPreview = lastMsg 
+            ? `<span>${lastMsg.sentBy === state.currentUser.id ? '<span class="text-gray-500 mr-1">✓</span>' : ''}${escapeHtml(lastMsg.text)}</span>` 
+            : '<span class="italic opacity-50">Start a conversation</span>';
+
+          el.innerHTML = `
+            <div class="relative">
+              <img src="${user.avatar}" class="w-12 h-12 rounded-full object-cover" />
+            </div>
+            <div class="ml-3 flex-1 min-w-0">
+              <div class="flex justify-between items-baseline">
+                <h3 class="text-gray-200 font-medium truncate">${user.name}</h3>
+                <span class="text-xs text-gray-500">${timeStr}</span>
+              </div>
+              <p class="text-sm text-gray-400 truncate">${msgPreview}</p>
+            </div>
+          `;
+          list.appendChild(el);
+        });
+      }
+
+      function renderChatWindow() {
+        const chatArea = document.getElementById('chat-area');
+        if (!chatArea) return;
+
+        if (!state.selectedUser) {
+          chatArea.innerHTML = `
+            <div class="flex-1 flex flex-col items-center justify-center text-center p-8 bg-gray-900 border-l border-gray-800">
+               <div class="w-64 h-64 bg-gray-800 rounded-full flex items-center justify-center mb-8 opacity-50">
+                  <img src="https://picsum.photos/seed/welcome/300/300" class="w-full h-full rounded-full object-cover opacity-20 grayscale" />
+               </div>
+               <h2 class="text-3xl text-gray-200 font-light mb-2">Bipolar Web</h2>
+               <p class="text-gray-500">Send and receive encrypted messages securely.</p>
+               <p class="text-gray-600 text-sm mt-4">Select a friend to start chatting.</p>
+            </div>
+          `;
+          return;
+        }
+
+        const partner = state.selectedUser;
+        
+        // Filter messages
+        const conversation = state.messages.filter(m => 
+          (m.sentBy === state.currentUser.id && m.sentTo === partner.id) ||
+          (m.sentBy === partner.id && m.sentTo === state.currentUser.id)
+        );
+
+        // Group by date
+        const groupedMessages = [];
+        conversation.forEach(msg => {
+          const dateStr = formatDate(msg.timestamp);
+          const lastGroup = groupedMessages[groupedMessages.length - 1];
+          if (lastGroup && lastGroup.date === dateStr) {
+            lastGroup.msgs.push(msg);
+          } else {
+            groupedMessages.push({ date: dateStr, msgs: [msg] });
+          }
+        });
+
+        // Generate HTML
+        let messagesHtml = '';
+        groupedMessages.forEach(group => {
+          messagesHtml += `
+            <div class="flex flex-col gap-2 mb-6">
+              <div class="flex justify-center mb-4 sticky top-0 z-0">
+                <span class="bg-gray-800 text-gray-400 text-xs py-1 px-3 rounded-full shadow-sm opacity-90">${group.date}</span>
+              </div>
+          `;
+          group.msgs.forEach(msg => {
+            const isMe = msg.sentBy === state.currentUser.id;
+            messagesHtml += `
+              <div class="flex w-full ${isMe ? 'justify-end' : 'justify-start'} mb-1">
+                <div class="relative max-w-[85%] md:max-w-[65%] px-4 py-2 rounded-lg text-sm shadow-md ${isMe ? 'bg-chat-sent text-white rounded-tr-none' : 'bg-chat-received text-white rounded-tl-none'}">
+                  <p class="leading-relaxed break-words text-[15px]">${escapeHtml(msg.text)}</p>
+                  <div class="text-[10px] text-right mt-1 ${isMe ? 'text-emerald-200' : 'text-gray-400'}">
+                    ${formatTime(msg.timestamp)} ${isMe ? '<span class="ml-1 text-emerald-300">✓✓</span>' : ''}
+                  </div>
+                </div>
+              </div>
+            `;
+          });
+          messagesHtml += `</div>`;
+        });
+
+        chatArea.innerHTML = `
+          <!-- Header -->
+          <div class="h-16 bg-gray-800 border-b border-gray-700 flex items-center px-4 justify-between z-10 flex-none shadow-md">
+            <div class="flex items-center gap-3">
+              <button id="back-btn" class="md:hidden text-white p-2 -ml-2">
+                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" /></svg>
+              </button>
+              <img src="${partner.avatar}" class="w-10 h-10 rounded-full" />
+              <span class="text-gray-100 font-semibold text-lg">${partner.name}</span>
+            </div>
+            <div class="flex gap-4 text-gray-400">
+               <svg class="w-5 h-5 cursor-pointer hover:text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" /></svg>
+            </div>
+          </div>
+
+          <!-- Messages -->
+          <div id="messages-container" class="flex-1 overflow-y-auto p-4 md:p-8 bg-black/40" style="background-image: url('https://www.transparenttextures.com/patterns/cubes.png');">
+             ${messagesHtml}
+          </div>
+
+          <!-- Input -->
+          <div class="bg-gray-800 px-4 py-3 flex items-center gap-3 flex-none">
+            <button class="text-gray-400 hover:text-gray-200">
+               <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+            </button>
+            <form id="msg-form" class="flex-1">
+              <input id="msg-input" type="text" placeholder="Type a message" autocomplete="off" class="w-full bg-gray-700 text-white rounded-lg px-4 py-3 focus:outline-none focus:ring-1 focus:ring-emerald-500 placeholder-gray-400" />
+            </form>
+            <button id="send-btn" class="text-gray-500 hover:text-emerald-500 transition-colors p-2">
+              <svg class="w-6 h-6 transform rotate-90" fill="currentColor" viewBox="0 0 20 20"><path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" /></svg>
+            </button>
+          </div>
+        `;
+
+        // Scroll to bottom
+        const container = document.getElementById('messages-container');
+        container.scrollTop = container.scrollHeight;
+
+        // Events
+        document.getElementById('back-btn').onclick = () => {
+          state.selectedUser = null;
+          refreshUI();
+        };
+
+        const handleSend = async (e) => {
+          e.preventDefault();
+          const input = document.getElementById('msg-input');
+          const text = input.value.trim();
+          if (!text) return;
+
+          input.value = '';
+          const btn = document.getElementById('send-btn');
+          btn.classList.remove('text-emerald-500');
+          btn.classList.add('text-gray-500');
+
+          try {
+            await sendMessage(state.currentUser.id, partner.id, text);
+          } catch (err) {
+            console.error(err);
+            input.value = text;
+          }
+        };
+
+        document.getElementById('msg-form').onsubmit = handleSend;
+        document.getElementById('send-btn').onclick = handleSend;
+        
+        const input = document.getElementById('msg-input');
+        input.oninput = (e) => {
+          const btn = document.getElementById('send-btn');
+          if (e.target.value.trim()) {
+            btn.classList.add('text-emerald-500');
+            btn.classList.remove('text-gray-500');
+          } else {
+            btn.classList.remove('text-emerald-500');
+            btn.classList.add('text-gray-500');
+          }
+        };
+      }
+
+      function escapeHtml(text) {
+        if (!text) return "";
+        const map = {
+          '&': '&amp;',
+          '<': '&lt;',
+          '>': '&gt;',
+          '"': '&quot;',
+          "'": '&#039;'
+        };
+        return text.replace(/[&<>"']/g, function(m) { return map[m]; });
+      }
+
+      window.addEventListener('resize', () => {
+        refreshUI();
+      });
+    </script>
+  </body>
+</html>
