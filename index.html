@@ -56,7 +56,7 @@
 
     <script type="module">
       import { initializeApp } from "firebase/app";
-      import { getDatabase, ref, push, onValue, off } from "firebase/database";
+      import { getDatabase, ref, push, onValue, off, set } from "firebase/database";
 
       // --- CONSTANTS ---
       const USERS = [
@@ -123,11 +123,33 @@
           timestamp: timestamp
         };
 
+        // Push to sender's "sent" box
         const senderRef = ref(db, `${ROOT_NODE}/${senderId}/sent/${weekKey}`);
         await push(senderRef, messagePayload);
 
+        // Push to receiver's "received" box
         const receiverRef = ref(db, `${ROOT_NODE}/${receiverId}/received/${weekKey}`);
         await push(receiverRef, messagePayload);
+      };
+
+      // Mark the conversation with 'partnerId' as seen by 'me' right now
+      const markAsRead = (myId, partnerId) => {
+        const statusRef = ref(db, `${ROOT_NODE}/status/${myId}/${partnerId}/last_seen`);
+        set(statusRef, Date.now());
+      };
+
+      // Subscribe to when 'partnerId' last read 'my' messages
+      const subscribeToPartnerReadStatus = (myId, partnerId, callback) => {
+        // We want to know when PARTNER read MY messages
+        // path: status/partnerId/myId/last_seen
+        const statusRef = ref(db, `${ROOT_NODE}/status/${partnerId}/${myId}/last_seen`);
+        
+        const unsubscribe = onValue(statusRef, (snapshot) => {
+          const timestamp = snapshot.val() || 0;
+          callback(timestamp);
+        });
+        
+        return () => off(statusRef);
       };
 
       const subscribeToMessages = (currentUser, callback) => {
@@ -178,8 +200,8 @@
         });
 
         return () => {
-          onSentValue(); // Unsubscribe not directly supported by just calling function on 3rd party wrappers sometimes, but Firebase onValue returns unsubscribe.
-          off(sentRef); // Explicit off if needed, but onValue returns unsubscribe
+          onSentValue(); 
+          off(sentRef);
           off(receivedRef);
         };
       };
@@ -191,7 +213,11 @@
         currentUser: null,
         selectedUser: null,
         messages: [],
-        unsubscribe: null
+        unsubscribe: null,
+        
+        // Read receipts
+        partnerLastSeen: 0, 
+        statusUnsubscribe: null
       };
 
       // DOM Root
@@ -258,11 +284,15 @@
 
       window.handleLogout = function() {
         if (state.unsubscribe) state.unsubscribe();
+        if (state.statusUnsubscribe) state.statusUnsubscribe();
+        
         state = {
           currentUser: null,
           selectedUser: null,
           messages: [],
-          unsubscribe: null
+          unsubscribe: null,
+          partnerLastSeen: 0,
+          statusUnsubscribe: null
         };
         localStorage.removeItem('bipolar_user_id');
         renderLogin();
@@ -270,13 +300,42 @@
 
       // Main App Initialization
       function initApp() {
-        // Subscribe to firebase
+        // Subscribe to messages
         state.unsubscribe = subscribeToMessages(state.currentUser.id, (msgs) => {
           state.messages = msgs;
+          // If we are currently chatting with someone, receiving a new message means we've "seen" it immediately
+          if (state.selectedUser) {
+             markAsRead(state.currentUser.id, state.selectedUser.id);
+          }
           refreshUI(); 
         });
 
         renderAppStructure();
+      }
+
+      // Select User Logic
+      function selectUser(user) {
+        // Clean up previous listeners
+        if (state.statusUnsubscribe) {
+           state.statusUnsubscribe();
+           state.statusUnsubscribe = null;
+        }
+
+        state.selectedUser = user;
+        state.partnerLastSeen = 0; // Reset temporarily
+
+        if (user) {
+           // 1. Mark as read immediately when opening chat
+           markAsRead(state.currentUser.id, user.id);
+
+           // 2. Subscribe to partner's read status (to see blue ticks on my messages)
+           state.statusUnsubscribe = subscribeToPartnerReadStatus(state.currentUser.id, user.id, (timestamp) => {
+              state.partnerLastSeen = timestamp;
+              refreshUI(); // Re-render to update tick colors
+           });
+        }
+
+        refreshUI();
       }
 
       // Render the shell (Sidebar + Chat Container)
@@ -364,10 +423,9 @@
 
           const el = document.createElement('div');
           el.className = `flex items-center p-3 cursor-pointer transition-colors border-b border-gray-800/50 ${isSelected ? 'bg-gray-800' : 'hover:bg-gray-800/50'}`;
-          // Define click handler on the element
+          
           el.addEventListener('click', () => {
-             state.selectedUser = user;
-             refreshUI();
+             selectUser(user);
           });
 
           const timeStr = lastMsg ? formatTime(lastMsg.timestamp) : '';
@@ -398,8 +456,8 @@
         if (!state.selectedUser) {
           chatArea.innerHTML = `
             <div class="flex-1 flex flex-col items-center justify-center text-center p-8 bg-gray-900 border-l border-gray-800">
-               <div class="w-64 h-64 bg-gray-800 rounded-full flex items-center justify-center mb-8 opacity-50">
-                  <img src="https://picsum.photos/seed/welcome/300/300" class="w-full h-full rounded-full object-cover opacity-20 grayscale" />
+               <div class="w-64 h-64 rounded-xl flex items-center justify-center mb-8 overflow-hidden shadow-2xl">
+                  <img src="https://picsum.photos/seed/bipolarweb/500/500" class="w-full h-full object-cover" />
                </div>
                <h2 class="text-3xl text-gray-200 font-light mb-2">Bipolar Web</h2>
                <p class="text-gray-500">Send and receive encrypted messages securely.</p>
@@ -440,12 +498,23 @@
           `;
           group.msgs.forEach(msg => {
             const isMe = msg.sentBy === state.currentUser.id;
+            
+            // Logic for ticks
+            // Double tick (Grey) by default if it's in the list (Delivered to DB)
+            // Blue tick if msg.timestamp <= state.partnerLastSeen
+            let ticks = '';
+            if (isMe) {
+               const isRead = msg.timestamp <= state.partnerLastSeen;
+               const tickColor = isRead ? 'text-blue-400' : 'text-gray-500';
+               ticks = `<span class="ml-1 ${tickColor} tracking-tighter text-xs">✓✓</span>`;
+            }
+
             messagesHtml += `
               <div class="flex w-full ${isMe ? 'justify-end' : 'justify-start'} mb-1">
                 <div class="relative max-w-[85%] md:max-w-[65%] px-4 py-2 rounded-lg text-sm shadow-md ${isMe ? 'bg-chat-sent text-white rounded-tr-none' : 'bg-chat-received text-white rounded-tl-none'}">
                   <p class="leading-relaxed break-words text-[15px]">${escapeHtml(msg.text)}</p>
                   <div class="text-[10px] text-right mt-1 ${isMe ? 'text-emerald-200' : 'text-gray-400'}">
-                    ${formatTime(msg.timestamp)} ${isMe ? '<span class="ml-1 text-emerald-300">✓✓</span>' : ''}
+                    ${formatTime(msg.timestamp)} ${ticks}
                   </div>
                 </div>
               </div>
@@ -494,8 +563,7 @@
 
         // Events
         document.getElementById('back-btn').onclick = () => {
-          state.selectedUser = null;
-          refreshUI();
+          selectUser(null);
         };
 
         const handleSend = async (e) => {
@@ -511,6 +579,8 @@
 
           try {
             await sendMessage(state.currentUser.id, partner.id, text);
+            // After sending, we don't necessarily update read status immediately, 
+            // but the UI will show grey ticks until the other person reads it.
           } catch (err) {
             console.error(err);
             input.value = text;
