@@ -353,6 +353,10 @@
         chats: {},
         myReadStatus: {},
         
+        // Partner Read Status (For ticks)
+        partnerReadStatus: 0,
+        partnerStatusUnsub: null,
+        
         // Subscription Handles
         unsubs: []
       };
@@ -614,8 +618,11 @@
       window.handleLogout = function() {
         state.unsubs.forEach(u => u());
         if(state.groupMessageUnsubs) state.groupMessageUnsubs.forEach(u => u());
+        if (state.partnerStatusUnsub) state.partnerStatusUnsub();
+        
         state.unsubs = [];
         state.groupMessageUnsubs = [];
+        state.partnerStatusUnsub = null;
         
         state.currentUser = null;
         state.selectedId = null;
@@ -637,6 +644,22 @@
         state.selectedId = id;
         state.selectedType = type;
         state.currentView = 'chat';
+
+        // Clear previous partner listener if exists
+        if (state.partnerStatusUnsub) {
+            state.partnerStatusUnsub();
+            state.partnerStatusUnsub = null;
+        }
+        state.partnerReadStatus = 0; // Reset ticks
+
+        // Subscribe to NEW partner's read status (if User chat)
+        if (id && type === 'user') {
+            const statusRef = ref(db, `${ROOT_NODE}/status/${id}/${state.currentUser.id}/last_seen`);
+            state.partnerStatusUnsub = onValue(statusRef, (snap) => {
+                 state.partnerReadStatus = snap.val() || 0;
+                 if(state.selectedId === id) renderChatMessages();
+            });
+        }
 
         // Render UI first to show the chat immediately
         renderChatStructure(); 
@@ -986,12 +1009,18 @@
            const sender = state.users[msg.sentBy];
            const senderName = sender ? getDisplayName(msg.sentBy) : 'Unknown';
            
-           // Simple tick logic (if message is in list, it's sent. "Read" logic is complex in sidebar, simple here)
            let ticks = '';
            if(isMe && !isGroup) {
-              // We could check against partner's last seen, but we don't subscribe to partner status globally for perf.
-              // We'll leave ticks simple or omit for now to stick to "static-like" simplicity requested, or simple double check.
-              ticks = `<span class="ml-1 text-blue-400 text-xs">✓✓</span>`;
+              // Read receipt logic
+              // Single gray tick: Sent/Delivered (assuming delivered for simplicity)
+              // Double blue tick: Seen by partner
+              const isSeen = msg.timestamp <= state.partnerReadStatus;
+              
+              if (isSeen) {
+                  ticks = `<span class="ml-1 text-blue-400 text-xs font-bold">✓✓</span>`;
+              } else {
+                  ticks = `<span class="ml-1 text-gray-400 text-xs font-bold">✓</span>`;
+              }
            }
            
            const bubbleClass = isMe ? 'bg-chat-sent text-white rounded-tr-none' : 'bg-chat-received text-white rounded-tl-none';
