@@ -51,6 +51,7 @@
       }
       .note-bubble {
         animation: popIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+        transform-origin: bottom left;
       }
 
       @keyframes slideIn {
@@ -761,6 +762,7 @@
            
            const name = isGroup ? data.name : getDisplayName(data.id);
            const avatar = isGroup ? data.avatar : getAvatar(data);
+           const note = (!isGroup && data.note) ? data.note : null;
            
            // Highlight logic for unread
            const unreadCount = item.unreadCount || 0;
@@ -789,6 +791,7 @@
            el.innerHTML = `
              <div class="relative flex-none">
                  <img src="${avatar}" class="w-12 h-12 ${isGroup?'rounded-lg':'rounded-full'} object-cover bg-gray-700" />
+                 ${note ? `<div class="absolute -top-3 -right-2 max-w-[80px] bg-white text-black text-[10px] px-2 py-0.5 rounded-lg rounded-bl-none shadow-md z-10 truncate border border-gray-200 note-bubble">${escapeHtml(note)}</div>` : ''}
              </div>
              <div class="ml-3 flex-1 min-w-0">
                <div class="flex justify-between items-baseline mb-0.5">
