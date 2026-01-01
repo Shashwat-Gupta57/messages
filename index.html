@@ -2,8 +2,8 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Bipolar Chat</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Talken-C</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <script>
@@ -41,37 +41,48 @@
           -ms-overflow-style: none;
           scrollbar-width: none;
       }
+      
+      /* Note Bubble Animation */
+      @keyframes popIn {
+        0% { transform: scale(0); opacity: 0; }
+        80% { transform: scale(1.1); }
+        100% { transform: scale(1); opacity: 1; }
+      }
+      .note-bubble {
+        animation: popIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+      }
+
+      /* Modal Backdrop */
+      .modal-backdrop {
+        background-color: rgba(0, 0, 0, 0.75);
+        backdrop-filter: blur(4px);
+      }
     </style>
     <script type="importmap">
     {
       "imports": {
         "firebase/app": "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js",
-        "firebase/database": "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js"
+        "firebase/database": "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js",
+        "firebase/storage": "https://www.gstatic.com/firebasejs/10.8.0/firebase-storage.js"
       }
     }
     </script>
   </head>
   <body>
-    <div id="root" class="h-screen w-screen bg-black overflow-hidden"></div>
+    <div id="root" class="h-screen w-screen bg-black overflow-hidden relative"></div>
+    
+    <!-- Modals Container (Injected dynamically) -->
+    <div id="modal-container"></div>
 
     <script type="module">
       import { initializeApp } from "firebase/app";
-      import { getDatabase, ref, push, onValue, off, set } from "firebase/database";
+      import { getDatabase, ref, push, onValue, off, set, update } from "firebase/database";
+      import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
 
       // --- CONSTANTS ---
-      const USERS = [
-        { 
-          id: 'Shashwat', 
-          name: 'Shashwat', 
-          avatar: 'res/icon-1.png',
-          color: 'bg-emerald-600'
-        },
-        { 
-          id: 'Apoorva', 
-          name: 'Apoorva', 
-          avatar: 'res/icon-2.png',
-          color: 'bg-indigo-600'
-        }
+      const PROFILE_COLORS = [
+        'bg-emerald-600', 'bg-indigo-600', 'bg-blue-600', 'bg-purple-600', 
+        'bg-rose-600', 'bg-orange-600', 'bg-cyan-600', 'bg-teal-600', 'bg-pink-600'
       ];
 
       const getWeekNumber = (d = new Date()) => {
@@ -110,6 +121,7 @@
 
       const app = initializeApp(firebaseConfig);
       const db = getDatabase(app);
+      const storage = getStorage(app);
       const ROOT_NODE = "messages_site";
 
       const sendMessage = async (senderId, receiverId, text) => {
@@ -138,18 +150,72 @@
         set(statusRef, Date.now());
       };
 
+      // Create New User
+      const createNewUser = async (nickname, password) => {
+         const usersRef = ref(db, `${ROOT_NODE}/users`);
+         const newUserRef = push(usersRef);
+         const seed = Math.floor(Math.random() * 10000);
+         const color = PROFILE_COLORS[Math.floor(Math.random() * PROFILE_COLORS.length)];
+         
+         const avatarUrl = `https://api.dicebear.com/7.x/avataaars/svg?seed=${nickname}-${seed}&backgroundColor=b6e3f4`;
+
+         const userData = {
+           id: newUserRef.key,
+           name: nickname,
+           password: password, // Stored in plain text as per static site constraints
+           avatar: avatarUrl,
+           color: color,
+           about: "Hey! I am new to Talken-C.",
+           note: "",
+           created_at: Date.now()
+         };
+
+         await set(newUserRef, userData);
+         return userData;
+      };
+
+      // Upload Image to Firebase Storage
+      const uploadProfileImage = async (file, userId) => {
+        try {
+          // Create a reference to 'profile_pictures/<userId>'
+          const storageReference = storageRef(storage, `profile_pictures/${userId}_${Date.now()}`);
+          const snapshot = await uploadBytes(storageReference, file);
+          const downloadURL = await getDownloadURL(snapshot.ref);
+          return downloadURL;
+        } catch (error) {
+          console.error("Upload failed", error);
+          alert("Image upload failed. Please try again.");
+          return null;
+        }
+      };
+
+      // Update Profile (About & Note)
+      const updateUserProfile = (userId, data) => {
+        const userRef = ref(db, `${ROOT_NODE}/users/${userId}`);
+        update(userRef, {
+          ...data,
+          updated_at: Date.now()
+        });
+      };
+
       // Subscribe to when 'partnerId' last read 'my' messages
       const subscribeToPartnerReadStatus = (myId, partnerId, callback) => {
-        // We want to know when PARTNER read MY messages
-        // path: status/partnerId/myId/last_seen
         const statusRef = ref(db, `${ROOT_NODE}/status/${partnerId}/${myId}/last_seen`);
-        
         const unsubscribe = onValue(statusRef, (snapshot) => {
           const timestamp = snapshot.val() || 0;
           callback(timestamp);
         });
-        
         return () => off(statusRef);
+      };
+
+      // Subscribe to ALL users (for list, login, and profile info)
+      const subscribeToUsers = (callback) => {
+        const usersRef = ref(db, `${ROOT_NODE}/users`);
+        const unsubscribe = onValue(usersRef, (snapshot) => {
+          const val = snapshot.val() || {};
+          callback(val);
+        });
+        return () => off(usersRef);
       };
 
       const subscribeToMessages = (currentUser, callback) => {
@@ -213,7 +279,9 @@
         currentUser: null,
         selectedUser: null,
         messages: [],
-        unsubscribe: null,
+        users: {}, 
+        unsubscribeMsg: null,
+        unsubscribeUsers: null,
         
         // Read receipts
         partnerLastSeen: 0, 
@@ -222,23 +290,39 @@
 
       // DOM Root
       const root = document.getElementById('root');
+      const modalContainer = document.getElementById('modal-container');
 
-      // Persistence
-      const savedUserId = localStorage.getItem('bipolar_user_id');
-      if (savedUserId) {
-        const user = USERS.find(u => u.id === savedUserId);
-        if (user) {
-          state.currentUser = user;
-          initApp();
-        } else {
-          renderLogin();
-        }
-      } else {
-        renderLogin();
+      // Initialize - Listen to Users first
+      function bootstrap() {
+        state.unsubscribeUsers = subscribeToUsers((usersData) => {
+          state.users = usersData;
+          
+          const savedUserId = localStorage.getItem('bipolar_user_id');
+          
+          // Auto-login check
+          if (!state.currentUser && savedUserId && state.users[savedUserId]) {
+             handleLoginSuccess(state.users[savedUserId]);
+          } else if (state.currentUser) {
+             if (state.users[state.currentUser.id]) {
+                state.currentUser = state.users[state.currentUser.id];
+             }
+             if (document.getElementById('user-list')) renderSidebarList();
+             if (state.selectedUser && state.users[state.selectedUser.id]) {
+                state.selectedUser = state.users[state.selectedUser.id];
+             }
+          } else {
+             renderLogin();
+          }
+        });
       }
+
+      bootstrap();
 
       // Login Screen
       function renderLogin() {
+        // If already logged in, don't show login
+        if (state.currentUser) return;
+
         root.innerHTML = `
           <div class="min-h-screen bg-bipolar-darker flex flex-col items-center justify-center p-4 w-full">
             <div class="max-w-2xl w-full">
@@ -246,12 +330,12 @@
                 <h1 class="text-4xl md:text-6xl font-bold text-white mb-4 tracking-tighter">Who are you?</h1>
                 <p class="text-gray-400 text-lg">Select your identity to access the private network.</p>
               </div>
-              <div class="grid grid-cols-2 gap-6 justify-center" id="login-grid">
+              <div class="grid grid-cols-2 sm:grid-cols-3 gap-6 justify-center" id="login-grid">
                 <!-- Users injected here -->
               </div>
               <div class="mt-16 text-center">
                 <p class="text-gray-600 text-sm">
-                  Bipolar Encrypted Connection &bull; Version 1.0 &bull; Pure JS Edition
+                  Talken-C Encrypted Connection &bull; Version 1.0 &bull; Pure JS Edition
                 </p>
               </div>
             </div>
@@ -259,86 +343,307 @@
         `;
 
         const grid = document.getElementById('login-grid');
-        USERS.forEach(user => {
+        const userList = Object.values(state.users);
+
+        userList.sort((a, b) => (a.created_at || 0) - (b.created_at || 0));
+
+        userList.forEach(user => {
           const el = document.createElement('div');
-          el.className = "group relative bg-gray-800 rounded-xl p-6 cursor-pointer hover:bg-gray-700 transition-all duration-300 transform hover:-translate-y-2 border border-gray-700 hover:border-gray-500 max-w-xs mx-auto w-full";
-          el.onclick = () => handleLogin(user);
+          el.className = "group relative bg-gray-800 rounded-xl p-6 cursor-pointer hover:bg-gray-700 transition-all duration-300 transform hover:-translate-y-2 border border-gray-700 hover:border-gray-500 w-full flex flex-col items-center";
+          el.onclick = () => promptLogin(user);
           el.innerHTML = `
-            <div class="flex flex-col items-center">
-              <div class="w-20 h-20 rounded-full mb-4 p-1 ${user.color} bg-opacity-20">
-                <img src="${user.avatar}" class="w-full h-full rounded-full object-cover border-2 border-white/10 group-hover:border-white/50 transition-colors" />
-              </div>
-              <h3 class="text-xl font-medium text-white group-hover:text-emerald-400 transition-colors">${user.name}</h3>
-              <span class="mt-2 text-xs text-gray-500 group-hover:text-gray-300">Tap to login</span>
+            <div class="w-20 h-20 rounded-full mb-4 p-1 ${user.color || 'bg-gray-600'} bg-opacity-20">
+              <img src="${user.avatar}" class="w-full h-full rounded-full object-cover border-2 border-white/10 group-hover:border-white/50 transition-colors" />
             </div>
+            <h3 class="text-lg font-medium text-white group-hover:text-emerald-400 transition-colors text-center truncate w-full">${user.name}</h3>
+            <span class="mt-2 text-xs text-gray-500 group-hover:text-gray-300">Tap to login</span>
           `;
           grid.appendChild(el);
         });
+
+        // Add "New User" card
+        const newEl = document.createElement('div');
+        newEl.className = "group relative bg-gray-900 rounded-xl p-6 cursor-pointer hover:bg-gray-800 transition-all duration-300 transform hover:-translate-y-2 border-2 border-dashed border-gray-700 hover:border-emerald-500 w-full flex flex-col items-center justify-center min-h-[180px]";
+        newEl.onclick = openNewUserModal;
+        newEl.innerHTML = `
+          <div class="w-16 h-16 rounded-full mb-4 bg-gray-800 flex items-center justify-center group-hover:bg-emerald-900/30 transition-colors">
+            <svg class="w-8 h-8 text-gray-500 group-hover:text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg>
+          </div>
+          <h3 class="text-lg font-medium text-gray-400 group-hover:text-white transition-colors">New User</h3>
+        `;
+        grid.appendChild(newEl);
       }
 
-      function handleLogin(user) {
+      function promptLogin(user) {
+        // If user has no password (legacy), just login
+        if (!user.password) {
+          handleLoginSuccess(user);
+          return;
+        }
+
+        renderModal(`
+          <div class="bg-gray-900 w-full max-w-sm rounded-2xl p-6 shadow-2xl border border-gray-800">
+            <h2 class="text-xl font-bold text-white mb-2">Welcome back, ${user.name}</h2>
+            <p class="text-gray-500 text-sm mb-6">Please enter your password to continue.</p>
+            <form id="login-form">
+              <div class="mb-6">
+                <input type="password" id="login-password" required placeholder="Enter password" class="w-full bg-gray-800 text-white rounded-lg px-4 py-3 border border-gray-700 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" />
+                <p id="login-error" class="text-red-500 text-xs mt-2 hidden">Incorrect password.</p>
+              </div>
+              <div class="flex justify-end gap-3">
+                 <button type="button" onclick="closeModal()" class="px-4 py-2 text-gray-400 hover:text-white">Cancel</button>
+                 <button type="submit" class="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-2 rounded-lg font-medium transition-colors">Login</button>
+              </div>
+            </form>
+          </div>
+        `);
+
+        document.getElementById('login-form').onsubmit = (e) => {
+          e.preventDefault();
+          const pwd = document.getElementById('login-password').value;
+          if (pwd === user.password) {
+             closeModal();
+             handleLoginSuccess(user);
+          } else {
+             document.getElementById('login-error').classList.remove('hidden');
+          }
+        };
+
+        // Auto focus
+        setTimeout(() => document.getElementById('login-password').focus(), 100);
+      }
+
+      function openNewUserModal() {
+        renderModal(`
+          <div class="bg-gray-900 w-full max-w-sm rounded-2xl p-6 shadow-2xl border border-gray-800">
+            <h2 class="text-xl font-bold text-white mb-4">Create New Identity</h2>
+            <form id="new-user-form">
+              <div class="mb-4">
+                <label class="block text-sm text-gray-400 mb-2">Nickname</label>
+                <input type="text" id="new-nickname" maxlength="15" required placeholder="Enter your name" class="w-full bg-gray-800 text-white rounded-lg px-4 py-3 border border-gray-700 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" />
+              </div>
+              <div class="mb-6">
+                <label class="block text-sm text-gray-400 mb-2">Password</label>
+                <input type="password" id="new-password" required placeholder="Create a password" class="w-full bg-gray-800 text-white rounded-lg px-4 py-3 border border-gray-700 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" />
+                <p class="text-xs text-gray-500 mt-1">Used to log back in later.</p>
+              </div>
+              <div class="flex justify-end gap-3">
+                 <button type="button" onclick="closeModal()" class="px-4 py-2 text-gray-400 hover:text-white">Cancel</button>
+                 <button type="submit" class="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-2 rounded-lg font-medium transition-colors">Create & Login</button>
+              </div>
+            </form>
+          </div>
+        `);
+
+        document.getElementById('new-user-form').onsubmit = async (e) => {
+           e.preventDefault();
+           const name = document.getElementById('new-nickname').value.trim();
+           const password = document.getElementById('new-password').value;
+           
+           if (!name || !password) return;
+           
+           const exists = Object.values(state.users).find(u => u.name.toLowerCase() === name.toLowerCase());
+           if (exists) {
+              alert('Nickname already taken. Please choose another.');
+              return;
+           }
+
+           // Loading state
+           const btn = e.target.querySelector('button[type="submit"]');
+           const originalText = btn.innerText;
+           btn.innerText = "Creating...";
+           btn.disabled = true;
+
+           const newUser = await createNewUser(name, password);
+           closeModal();
+           handleLoginSuccess(newUser);
+        };
+      }
+
+      function handleLoginSuccess(user) {
         state.currentUser = user;
         localStorage.setItem('bipolar_user_id', user.id);
         initApp();
       }
 
       window.handleLogout = function() {
-        if (state.unsubscribe) state.unsubscribe();
+        if (state.unsubscribeMsg) state.unsubscribeMsg();
         if (state.statusUnsubscribe) state.statusUnsubscribe();
         
-        state = {
-          currentUser: null,
-          selectedUser: null,
-          messages: [],
-          unsubscribe: null,
-          partnerLastSeen: 0,
-          statusUnsubscribe: null
-        };
+        state.currentUser = null;
+        state.selectedUser = null;
+        state.messages = [];
+        state.partnerLastSeen = 0;
+        state.statusUnsubscribe = null;
+        state.unsubscribeMsg = null;
+        
         localStorage.removeItem('bipolar_user_id');
+        closeModal();
         renderLogin();
       }
 
       // Main App Initialization
       function initApp() {
-        // Subscribe to messages
-        state.unsubscribe = subscribeToMessages(state.currentUser.id, (msgs) => {
+        renderAppStructure();
+        
+        state.unsubscribeMsg = subscribeToMessages(state.currentUser.id, (msgs) => {
           state.messages = msgs;
-          // If we are currently chatting with someone, receiving a new message means we've "seen" it immediately
           if (state.selectedUser) {
              markAsRead(state.currentUser.id, state.selectedUser.id);
           }
-          refreshUI(); 
+          renderSidebarList();
+          renderChatMessages();
         });
-
-        renderAppStructure();
       }
 
-      // Select User Logic
       function selectUser(user) {
-        // Clean up previous listeners
         if (state.statusUnsubscribe) {
            state.statusUnsubscribe();
            state.statusUnsubscribe = null;
         }
 
         state.selectedUser = user;
-        state.partnerLastSeen = 0; // Reset temporarily
+        state.partnerLastSeen = 0; 
+
+        renderChatStructure(user);
+        updateMobileLayout();
 
         if (user) {
-           // 1. Mark as read immediately when opening chat
            markAsRead(state.currentUser.id, user.id);
 
-           // 2. Subscribe to partner's read status (to see blue ticks on my messages)
            state.statusUnsubscribe = subscribeToPartnerReadStatus(state.currentUser.id, user.id, (timestamp) => {
               state.partnerLastSeen = timestamp;
-              refreshUI(); // Re-render to update tick colors
+              renderChatMessages();
            });
+           
+           renderChatMessages();
         }
-
-        refreshUI();
+        renderSidebarList();
       }
 
-      // Render the shell (Sidebar + Chat Container)
+      // --- UI RENDERING ---
+
+      window.openMyProfile = function() {
+        const myProfile = state.users[state.currentUser.id] || state.currentUser;
+        renderModal(`
+          <div class="bg-gray-900 w-full max-w-md rounded-2xl p-6 shadow-2xl border border-gray-800">
+            <div class="flex justify-between items-center mb-6">
+              <h2 class="text-xl font-bold text-white">Edit Profile</h2>
+              <button onclick="closeModal()" class="text-gray-400 hover:text-white">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
+              </button>
+            </div>
+            
+            <form id="profile-form" class="space-y-4">
+              <div class="flex items-center gap-4 mb-4">
+                  <div class="relative w-16 h-16">
+                     <img src="${myProfile.avatar}" class="w-16 h-16 rounded-full object-cover border border-gray-600" id="preview-avatar" />
+                  </div>
+                  <div class="flex-1">
+                     <label class="block text-sm text-gray-400 mb-1">Display Picture</label>
+                     <input type="file" id="input-avatar" accept="image/*" class="text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-gray-800 file:text-emerald-400 hover:file:bg-gray-700"/>
+                     <p class="text-[10px] text-gray-500 mt-1">Max 5MB</p>
+                  </div>
+              </div>
+
+              <div>
+                <label class="block text-sm text-gray-400 mb-1">Your Note (Status)</label>
+                <input type="text" id="input-note" maxlength="30" value="${escapeHtml(myProfile.note || '')}" placeholder="What's on your mind?" class="w-full bg-gray-800 text-white rounded-lg px-4 py-2 border border-gray-700 focus:border-emerald-500 focus:outline-none" />
+                <p class="text-xs text-gray-500 mt-1">Short status visible in the chat list.</p>
+              </div>
+
+              <div>
+                <label class="block text-sm text-gray-400 mb-1">About</label>
+                <textarea id="input-about" rows="4" placeholder="Tell us about yourself..." class="w-full bg-gray-800 text-white rounded-lg px-4 py-2 border border-gray-700 focus:border-emerald-500 focus:outline-none">${escapeHtml(myProfile.about || '')}</textarea>
+              </div>
+
+              <div class="pt-4 flex justify-end gap-3">
+                 <button type="button" onclick="handleLogout()" class="px-4 py-2 text-red-400 text-sm hover:text-red-300">Switch Account</button>
+                 <button type="submit" class="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-2 rounded-lg font-medium transition-colors">Save Profile</button>
+              </div>
+            </form>
+          </div>
+        `);
+
+        // Avatar Preview Logic
+        document.getElementById('input-avatar').onchange = (e) => {
+           const file = e.target.files[0];
+           if (file) {
+              if (file.size > 5 * 1024 * 1024) {
+                 alert("File size exceeds 5MB.");
+                 e.target.value = ""; 
+                 return;
+              }
+              document.getElementById('preview-avatar').src = URL.createObjectURL(file);
+           }
+        };
+
+        document.getElementById('profile-form').onsubmit = async (e) => {
+          e.preventDefault();
+          const btn = e.target.querySelector('button[type="submit"]');
+          const originalText = btn.innerText;
+          btn.innerText = "Saving...";
+          btn.disabled = true;
+
+          const note = document.getElementById('input-note').value.trim();
+          const about = document.getElementById('input-about').value.trim();
+          const fileInput = document.getElementById('input-avatar');
+          
+          let avatarUrl = myProfile.avatar;
+          
+          if (fileInput.files.length > 0) {
+             const uploadedUrl = await uploadProfileImage(fileInput.files[0], state.currentUser.id);
+             if (uploadedUrl) {
+                avatarUrl = uploadedUrl;
+             }
+          }
+          
+          updateUserProfile(state.currentUser.id, { note, about, avatar: avatarUrl });
+          closeModal();
+        };
+      };
+
+      // Toggle Friend Info Modal
+      window.openFriendProfile = function() {
+        if (!state.selectedUser) return;
+        const user = state.users[state.selectedUser.id] || state.selectedUser;
+        
+        renderModal(`
+           <div class="bg-gray-900 w-full max-w-sm rounded-2xl p-6 shadow-2xl border border-gray-800 flex flex-col items-center text-center">
+              <button onclick="closeModal()" class="absolute top-4 right-4 text-gray-400 hover:text-white">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
+              </button>
+              
+              <div class="relative mb-4">
+                 <img src="${user.avatar}" class="w-24 h-24 rounded-full border-4 border-gray-800 shadow-lg bg-gray-700 object-cover" />
+                 ${user.note ? `<div class="absolute -bottom-2 left-1/2 transform -translate-x-1/2 bg-gray-800 text-emerald-400 text-xs px-2 py-1 rounded-full border border-gray-700 whitespace-nowrap shadow-sm">${escapeHtml(user.note)}</div>` : ''}
+              </div>
+              
+              <h2 class="text-2xl font-bold text-white mb-1">${user.name}</h2>
+              <p class="text-gray-500 text-xs mb-6 uppercase tracking-wider opacity-60">ID: ${user.id.substring(0,8)}...</p>
+              
+              <div class="w-full bg-gray-800/50 rounded-xl p-4 text-left">
+                <h3 class="text-xs uppercase tracking-wider text-gray-500 font-semibold mb-2">About</h3>
+                <p class="text-gray-300 leading-relaxed text-sm">${user.about ? escapeHtml(user.about).replace(/\n/g, '<br>') : '<span class="italic text-gray-600">No info available.</span>'}</p>
+              </div>
+           </div>
+        `);
+      }
+
+      function renderModal(content) {
+        modalContainer.innerHTML = `
+          <div class="fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop" onclick="if(event.target === this) closeModal()">
+            <div class="transform transition-all duration-300 scale-100 opacity-100">
+               ${content}
+            </div>
+          </div>
+        `;
+      }
+
+      window.closeModal = function() {
+        modalContainer.innerHTML = '';
+      }
+
       function renderAppStructure() {
         root.innerHTML = `
           <div class="flex w-full h-full bg-black overflow-hidden relative">
@@ -347,10 +652,14 @@
               <!-- Sidebar Header -->
               <div class="bg-gray-900 p-4 flex items-center justify-between border-b border-gray-800 h-16 flex-none">
                 <div class="flex items-center gap-3">
-                  <img src="${state.currentUser.avatar}" class="w-10 h-10 rounded-full border border-gray-600" />
-                  <span class="font-semibold text-gray-200">Me (${state.currentUser.name})</span>
+                  <img src="${state.currentUser.avatar}" class="w-10 h-10 rounded-full border border-gray-600 cursor-pointer hover:opacity-80 transition bg-gray-800 object-cover" onclick="openMyProfile()" />
+                  <span class="font-semibold text-gray-200 cursor-pointer truncate max-w-[120px]" onclick="openMyProfile()">Me (${state.currentUser.name})</span>
                 </div>
-                <button onclick="handleLogout()" class="text-xs text-red-400 hover:text-red-300 transition">Change ID</button>
+                <div class="flex gap-2">
+                  <button onclick="openMyProfile()" class="p-2 rounded-full hover:bg-gray-800 text-gray-400 hover:text-white transition">
+                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+                  </button>
+                </div>
               </div>
               
               <!-- Search -->
@@ -367,22 +676,21 @@
 
             <!-- Chat Area -->
             <div id="chat-area" class="flex-1 flex flex-col bg-gray-900 relative w-full h-full z-10 hidden md:flex">
-               <!-- Content injected by renderChat() -->
+               <!-- Content injected dynamically -->
             </div>
           </div>
         `;
-
-        refreshUI();
+        
+        renderSidebarList();
+        renderChatStructure(null);
       }
 
-      // Refresh UI based on state
-      function refreshUI() {
+      function updateMobileLayout() {
         const sidebar = document.getElementById('sidebar');
         const chatArea = document.getElementById('chat-area');
         
         if (!sidebar || !chatArea) return; 
 
-        // Mobile Toggle Logic
         if (window.innerWidth < 768) {
           if (state.selectedUser) {
             sidebar.classList.add('-translate-x-full');
@@ -394,14 +702,10 @@
             chatArea.classList.remove('flex');
           }
         } else {
-          // Desktop: Always show both
           sidebar.classList.remove('-translate-x-full');
           chatArea.classList.remove('hidden');
           chatArea.classList.add('flex');
         }
-
-        renderSidebarList();
-        renderChatWindow();
       }
 
       function renderSidebarList() {
@@ -409,12 +713,11 @@
         if (!list) return;
         list.innerHTML = '';
 
-        const otherUsers = USERS.filter(u => u.id !== state.currentUser.id);
+        const otherUsers = Object.values(state.users).filter(u => u.id !== state.currentUser.id);
 
         otherUsers.forEach(user => {
           const isSelected = state.selectedUser?.id === user.id;
           
-          // Get last message
           const conversation = state.messages.filter(m => 
             (m.sentBy === state.currentUser.id && m.sentTo === user.id) ||
             (m.sentBy === user.id && m.sentTo === state.currentUser.id)
@@ -433,11 +736,16 @@
             ? `<span>${lastMsg.sentBy === state.currentUser.id ? '<span class="text-gray-500 mr-1">✓</span>' : ''}${escapeHtml(lastMsg.text)}</span>` 
             : '<span class="italic opacity-50">Start a conversation</span>';
 
+          const noteHtml = user.note 
+            ? `<div class="absolute -top-3 -right-2 bg-gray-700 text-emerald-300 text-[10px] leading-3 px-2 py-1 rounded-lg border border-gray-600 shadow-sm note-bubble w-20 break-words whitespace-normal text-center z-10 opacity-90">${escapeHtml(user.note)}</div>` 
+            : '';
+
           el.innerHTML = `
-            <div class="relative">
-              <img src="${user.avatar}" class="w-12 h-12 rounded-full object-cover" />
+            <div class="relative flex-none">
+              <img src="${user.avatar}" class="w-12 h-12 rounded-full object-cover bg-gray-700" />
+              ${noteHtml}
             </div>
-            <div class="ml-3 flex-1 min-w-0">
+            <div class="ml-4 flex-1 min-w-0">
               <div class="flex justify-between items-baseline">
                 <h3 class="text-gray-200 font-medium truncate">${user.name}</h3>
                 <span class="text-xs text-gray-500">${timeStr}</span>
@@ -449,33 +757,126 @@
         });
       }
 
-      function renderChatWindow() {
+      function renderChatStructure(partner) {
         const chatArea = document.getElementById('chat-area');
         if (!chatArea) return;
 
-        if (!state.selectedUser) {
-          chatArea.innerHTML = `
+        if (!partner) {
+           chatArea.innerHTML = `
             <div class="flex-1 flex flex-col items-center justify-center text-center p-8 bg-gray-900 border-l border-gray-800">
                <div class="w-64 h-64 rounded-xl flex items-center justify-center mb-8 overflow-hidden shadow-2xl">
-                  <img src="https://picsum.photos/seed/bipolarweb/500/500" class="w-full h-full object-cover" />
+                  <img src="https://picsum.photos/seed/talkenc/500/500" class="w-full h-full object-cover" />
                </div>
-               <h2 class="text-3xl text-gray-200 font-light mb-2">Bipolar Web</h2>
+               <h2 class="text-3xl text-gray-200 font-light mb-2">Talken-C</h2>
                <p class="text-gray-500">Send and receive encrypted messages securely.</p>
                <p class="text-gray-600 text-sm mt-4">Select a friend to start chatting.</p>
             </div>
-          `;
-          return;
+           `;
+           chatArea.removeAttribute('data-partner-id');
+           return;
         }
+
+        const currentPartnerId = chatArea.getAttribute('data-partner-id');
+        if (currentPartnerId === partner.id) {
+           return; 
+        }
+
+        chatArea.setAttribute('data-partner-id', partner.id);
+
+        chatArea.innerHTML = `
+          <!-- Header -->
+          <div class="h-16 bg-gray-800 border-b border-gray-700 flex items-center px-4 justify-between z-10 flex-none shadow-md">
+            <div class="flex items-center gap-3 cursor-pointer group" onclick="openFriendProfile()">
+              <button id="back-btn" class="md:hidden text-white p-2 -ml-2 stop-prop">
+                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" /></svg>
+              </button>
+              <img src="${partner.avatar}" class="w-10 h-10 rounded-full group-hover:opacity-80 transition bg-gray-700 object-cover" />
+              <div class="flex flex-col">
+                 <span class="text-gray-100 font-semibold text-lg leading-tight group-hover:text-emerald-400 transition">${partner.name}</span>
+                 <span class="text-[10px] text-gray-500 leading-tight">Click for info</span>
+              </div>
+            </div>
+            <div class="flex gap-4 text-gray-400">
+               <button onclick="openFriendProfile()">
+                 <svg class="w-5 h-5 cursor-pointer hover:text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+               </button>
+            </div>
+          </div>
+
+          <!-- Messages Container -->
+          <div id="messages-container" class="flex-1 overflow-y-auto p-4 md:p-8 bg-black/40" style="background-image: url('https://www.transparenttextures.com/patterns/cubes.png');">
+             <!-- Messages Injected Here -->
+          </div>
+
+          <!-- Input Area -->
+          <div class="bg-gray-800 px-4 py-3 flex items-center gap-3 flex-none">
+            <button class="text-gray-400 hover:text-gray-200">
+               <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+            </button>
+            <form id="msg-form" class="flex-1">
+              <input id="msg-input" type="text" placeholder="Type a message" autocomplete="off" class="w-full bg-gray-700 text-white rounded-lg px-4 py-3 focus:outline-none focus:ring-1 focus:ring-emerald-500 placeholder-gray-400" />
+            </form>
+            <button id="send-btn" class="text-gray-500 hover:text-emerald-500 transition-colors p-2">
+              <svg class="w-6 h-6 transform rotate-90" fill="currentColor" viewBox="0 0 20 20"><path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" /></svg>
+            </button>
+          </div>
+        `;
+
+        document.getElementById('back-btn').onclick = (e) => {
+          e.stopPropagation();
+          selectUser(null);
+        };
+
+        const handleSend = async (e) => {
+          e.preventDefault();
+          const input = document.getElementById('msg-input');
+          const text = input.value.trim();
+          if (!text) return;
+
+          input.value = '';
+          const btn = document.getElementById('send-btn');
+          btn.classList.remove('text-emerald-500');
+          btn.classList.add('text-gray-500');
+
+          try {
+            await sendMessage(state.currentUser.id, partner.id, text);
+          } catch (err) {
+            console.error(err);
+            input.value = text;
+          }
+        };
+
+        document.getElementById('msg-form').onsubmit = handleSend;
+        document.getElementById('send-btn').onclick = handleSend;
+        
+        const input = document.getElementById('msg-input');
+        input.oninput = (e) => {
+          const btn = document.getElementById('send-btn');
+          if (e.target.value.trim()) {
+            btn.classList.add('text-emerald-500');
+            btn.classList.remove('text-gray-500');
+          } else {
+            btn.classList.remove('text-emerald-500');
+            btn.classList.add('text-gray-500');
+          }
+        };
+
+        if (window.innerWidth >= 768) {
+           input.focus();
+        }
+      }
+
+      function renderChatMessages() {
+        const container = document.getElementById('messages-container');
+        if (!container || !state.selectedUser) return;
 
         const partner = state.selectedUser;
         
-        // Filter messages
         const conversation = state.messages.filter(m => 
           (m.sentBy === state.currentUser.id && m.sentTo === partner.id) ||
           (m.sentBy === partner.id && m.sentTo === state.currentUser.id)
         );
 
-        // Group by date
         const groupedMessages = [];
         conversation.forEach(msg => {
           const dateStr = formatDate(msg.timestamp);
@@ -487,7 +888,6 @@
           }
         });
 
-        // Generate HTML
         let messagesHtml = '';
         groupedMessages.forEach(group => {
           messagesHtml += `
@@ -499,9 +899,6 @@
           group.msgs.forEach(msg => {
             const isMe = msg.sentBy === state.currentUser.id;
             
-            // Logic for ticks
-            // Double tick (Grey) by default if it's in the list (Delivered to DB)
-            // Blue tick if msg.timestamp <= state.partnerLastSeen
             let ticks = '';
             if (isMe) {
                const isRead = msg.timestamp <= state.partnerLastSeen;
@@ -523,84 +920,8 @@
           messagesHtml += `</div>`;
         });
 
-        chatArea.innerHTML = `
-          <!-- Header -->
-          <div class="h-16 bg-gray-800 border-b border-gray-700 flex items-center px-4 justify-between z-10 flex-none shadow-md">
-            <div class="flex items-center gap-3">
-              <button id="back-btn" class="md:hidden text-white p-2 -ml-2">
-                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" /></svg>
-              </button>
-              <img src="${partner.avatar}" class="w-10 h-10 rounded-full" />
-              <span class="text-gray-100 font-semibold text-lg">${partner.name}</span>
-            </div>
-            <div class="flex gap-4 text-gray-400">
-               <svg class="w-5 h-5 cursor-pointer hover:text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" /></svg>
-            </div>
-          </div>
-
-          <!-- Messages -->
-          <div id="messages-container" class="flex-1 overflow-y-auto p-4 md:p-8 bg-black/40" style="background-image: url('https://www.transparenttextures.com/patterns/cubes.png');">
-             ${messagesHtml}
-          </div>
-
-          <!-- Input -->
-          <div class="bg-gray-800 px-4 py-3 flex items-center gap-3 flex-none">
-            <button class="text-gray-400 hover:text-gray-200">
-               <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-            </button>
-            <form id="msg-form" class="flex-1">
-              <input id="msg-input" type="text" placeholder="Type a message" autocomplete="off" class="w-full bg-gray-700 text-white rounded-lg px-4 py-3 focus:outline-none focus:ring-1 focus:ring-emerald-500 placeholder-gray-400" />
-            </form>
-            <button id="send-btn" class="text-gray-500 hover:text-emerald-500 transition-colors p-2">
-              <svg class="w-6 h-6 transform rotate-90" fill="currentColor" viewBox="0 0 20 20"><path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" /></svg>
-            </button>
-          </div>
-        `;
-
-        // Scroll to bottom
-        const container = document.getElementById('messages-container');
+        container.innerHTML = messagesHtml;
         container.scrollTop = container.scrollHeight;
-
-        // Events
-        document.getElementById('back-btn').onclick = () => {
-          selectUser(null);
-        };
-
-        const handleSend = async (e) => {
-          e.preventDefault();
-          const input = document.getElementById('msg-input');
-          const text = input.value.trim();
-          if (!text) return;
-
-          input.value = '';
-          const btn = document.getElementById('send-btn');
-          btn.classList.remove('text-emerald-500');
-          btn.classList.add('text-gray-500');
-
-          try {
-            await sendMessage(state.currentUser.id, partner.id, text);
-            // After sending, we don't necessarily update read status immediately, 
-            // but the UI will show grey ticks until the other person reads it.
-          } catch (err) {
-            console.error(err);
-            input.value = text;
-          }
-        };
-
-        document.getElementById('msg-form').onsubmit = handleSend;
-        document.getElementById('send-btn').onclick = handleSend;
-        
-        const input = document.getElementById('msg-input');
-        input.oninput = (e) => {
-          const btn = document.getElementById('send-btn');
-          if (e.target.value.trim()) {
-            btn.classList.add('text-emerald-500');
-            btn.classList.remove('text-gray-500');
-          } else {
-            btn.classList.remove('text-emerald-500');
-            btn.classList.add('text-gray-500');
-          }
-        };
       }
 
       function escapeHtml(text) {
@@ -616,7 +937,7 @@
       }
 
       window.addEventListener('resize', () => {
-        refreshUI();
+        updateMobileLayout();
       });
     </script>
   </body>
